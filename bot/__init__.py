@@ -1,0 +1,1 @@
+"""Personal Discord planner bot."""

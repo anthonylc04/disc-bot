@@ -1,0 +1,5 @@
+# Normalize line endings in the repo; check out with native endings.
+* text=auto
+*.py text eol=lf
+*.md text
+*.toml text
