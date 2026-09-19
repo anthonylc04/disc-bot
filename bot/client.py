@@ -10,6 +10,7 @@ from discord.ext import commands
 from .config import Config
 from .db import Database
 from .planner import Planner
+from .views import AgendaView, ReminderDoneButton, ReminderSnoozeButton
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,11 @@ class PlannerBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.db = Database(self.config.db_path)
         log.info("Database ready at %s", self.config.db_path)
+
+        # Register the interactive components so buttons and dropdowns on messages
+        # posted before a restart keep working.
+        self.add_view(AgendaView())
+        self.add_dynamic_items(ReminderDoneButton, ReminderSnoozeButton)
 
         # Register commands to your server only: changes show up instantly
         # (global commands can take a while to propagate).

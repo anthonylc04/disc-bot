@@ -29,6 +29,10 @@ class Config:
     db_path: Path
     poll_seconds: int
     missed_max_hours: int
+    agenda_channel_id: int      # 0 disables the daily agenda
+    agenda_hour: int
+    agenda_minute: int
+    snooze_minutes: int
 
 
 def _require(name: str) -> str:
@@ -81,4 +85,8 @@ def load_config() -> Config:
         db_path=_resolve_path(os.getenv("DB_PATH", "data/reminders.db").strip()),
         poll_seconds=_int("POLL_SECONDS", 30, lo=5, hi=300),
         missed_max_hours=_int("MISSED_MAX_HOURS", 12, lo=0),
+        agenda_channel_id=_int("AGENDA_CHANNEL_ID", 0, lo=0),
+        agenda_hour=_int("AGENDA_HOUR", 10, lo=0, hi=23),
+        agenda_minute=_int("AGENDA_MINUTE", 0, lo=0, hi=59),
+        snooze_minutes=_int("SNOOZE_MINUTES", 10, lo=1, hi=1440),
     )

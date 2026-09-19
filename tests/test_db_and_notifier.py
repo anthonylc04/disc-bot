@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from bot.db import Database
+from bot.db import SCHEMA_VERSION, Database
 from bot.notifier import collect_due, mark_sent
 
 NY = ZoneInfo("America/New_York")
@@ -55,7 +55,7 @@ def test_add_and_get_roundtrip(db):
 
 def test_schema_version_set(db):
     (v,) = db._conn.execute("PRAGMA user_version").fetchone()
-    assert v == 1
+    assert v == SCHEMA_VERSION
 
 
 def test_file_db_persists_across_reopen(tmp_path):

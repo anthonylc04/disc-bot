@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminders (
@@ -26,11 +26,34 @@ CREATE TABLE IF NOT EXISTS reminders (
     event_sent_at    INTEGER,                    -- set once the at-time message is sent
     status           TEXT    NOT NULL DEFAULT 'active'
                      CHECK (status IN ('active', 'done', 'cancelled', 'missed')),
-    created_at       INTEGER NOT NULL
+    created_at       INTEGER NOT NULL,
+    completed_at     INTEGER                     -- set when you check it off yourself
 );
 
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, event_at);
+
+-- One posted agenda message per planning day, so it can be edited in place.
+CREATE TABLE IF NOT EXISTS agendas (
+    plan_day    TEXT    PRIMARY KEY,   -- ISO date of the planning day, e.g. '2026-09-19'
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL
+);
 """
+
+_MIGRATIONS = {
+    2: [
+        "ALTER TABLE reminders ADD COLUMN completed_at INTEGER",
+        """
+        CREATE TABLE IF NOT EXISTS agendas (
+            plan_day    TEXT    PRIMARY KEY,
+            channel_id  INTEGER NOT NULL,
+            message_id  INTEGER NOT NULL,
+            created_at  INTEGER NOT NULL
+        )
+        """,
+    ],
+}
 
 
 def to_epoch(dt: datetime) -> int:
@@ -56,6 +79,7 @@ class Reminder:
     event_sent_at: datetime | None
     status: str
     created_at: datetime
+    completed_at: datetime | None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Reminder":
@@ -71,6 +95,26 @@ class Reminder:
             warning_sent_at=opt(row["warning_sent_at"]),
             event_sent_at=opt(row["event_sent_at"]),
             status=row["status"],
+            created_at=from_epoch(row["created_at"]),
+            completed_at=opt(row["completed_at"]),
+        )
+
+
+@dataclass(frozen=True)
+class AgendaRecord:
+    """The agenda message posted for one planning day, so it can be edited later."""
+
+    plan_day: date
+    channel_id: int
+    message_id: int
+    created_at: datetime
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "AgendaRecord":
+        return cls(
+            plan_day=date.fromisoformat(row["plan_day"]),
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
             created_at=from_epoch(row["created_at"]),
         )
 
@@ -90,11 +134,17 @@ class Database:
             raise RuntimeError(
                 f"Database schema v{version} is newer than this code (v{SCHEMA_VERSION}). Update the bot."
             )
-        if version < 1:
+        if version == 0:
             with self._conn:
                 self._conn.executescript(_SCHEMA)
+        else:
+            for target in range(version + 1, SCHEMA_VERSION + 1):
+                with self._conn:
+                    for statement in _MIGRATIONS[target]:
+                        self._conn.execute(statement)
+        if version != SCHEMA_VERSION:
+            with self._conn:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        # Future migrations: `if version < 2: ...`
 
     def close(self) -> None:
         self._conn.close()
@@ -155,6 +205,50 @@ class Database:
                 (to_epoch(now), to_epoch(now), status, reminder_id),
             )
 
+    def complete(self, reminder_id: int, user_id: int, now: datetime) -> Reminder | None:
+        """Check a reminder off. It stops firing, and the agenda shows it as done.
+
+        Returns the reminder, or None if it isn't yours or was already closed out.
+        """
+        ts = to_epoch(now)
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE reminders
+                SET status          = 'done',
+                    completed_at    = ?,
+                    warning_sent_at = COALESCE(warning_sent_at, ?),
+                    event_sent_at   = COALESCE(event_sent_at, ?)
+                WHERE id = ? AND user_id = ?
+                  AND completed_at IS NULL
+                  AND status IN ('active', 'done', 'missed')  -- a reminder that already
+                                                              -- fired can still be ticked off
+                """,
+                (ts, ts, ts, reminder_id, user_id),
+            )
+        return self.get(reminder_id) if cur.rowcount else None
+
+    def snooze(self, reminder_id: int, user_id: int, minutes: int, now: datetime) -> Reminder | None:
+        """Push an active reminder out by ``minutes`` from now. No new warning is scheduled."""
+        new_event = to_epoch(now + timedelta(minutes=minutes))
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE reminders
+                SET event_at        = ?,
+                    event_sent_at   = NULL,
+                    warning_at      = NULL,
+                    warning_sent_at = COALESCE(warning_sent_at, ?)
+                WHERE id = ? AND user_id = ? AND status IN ('active', 'done') AND completed_at IS NULL
+                """,
+                (new_event, to_epoch(now), reminder_id, user_id),
+            )
+            if cur.rowcount:
+                self._conn.execute(
+                    "UPDATE reminders SET status = 'active' WHERE id = ?", (reminder_id,)
+                )
+        return self.get(reminder_id) if cur.rowcount else None
+
     def cancel(self, reminder_id: int, user_id: int) -> Reminder | None:
         """Cancel an active reminder owned by ``user_id``. Returns it, or None if not found/active."""
         with self._conn:
@@ -211,3 +305,40 @@ class Database:
             (to_epoch(now),),
         )
         return [Reminder.from_row(r) for r in rows]
+
+    # --- day view and agenda bookkeeping -----------------------------------------
+
+    def for_day(self, user_id: int, start: datetime, end: datetime) -> list[Reminder]:
+        """Everything scheduled in [start, end) except cancellations, for the agenda list."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM reminders
+            WHERE user_id = ? AND status != 'cancelled' AND event_at >= ? AND event_at < ?
+            ORDER BY event_at, id
+            """,
+            (user_id, to_epoch(start), to_epoch(end)),
+        )
+        return [Reminder.from_row(r) for r in rows]
+
+    def get_agenda(self, plan_day: date) -> AgendaRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM agendas WHERE plan_day = ?", (plan_day.isoformat(),)
+        ).fetchone()
+        return AgendaRecord.from_row(row) if row else None
+
+    def set_agenda(self, plan_day: date, channel_id: int, message_id: int, now: datetime) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO agendas (plan_day, channel_id, message_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(plan_day) DO UPDATE SET channel_id = excluded.channel_id,
+                                                    message_id = excluded.message_id,
+                                                    created_at = excluded.created_at
+                """,
+                (plan_day.isoformat(), channel_id, message_id, to_epoch(now)),
+            )
+
+    def clear_agenda(self, plan_day: date) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM agendas WHERE plan_day = ?", (plan_day.isoformat(),))

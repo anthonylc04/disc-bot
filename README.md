@@ -11,12 +11,30 @@ it's time, with an optional heads-up a few minutes before.
 | `/tmrw time task [notif] [desc]` | Reminder for tomorrow. |
 | `/list [day]` | Upcoming reminders: all, today, or tomorrow. |
 | `/cancel reminder` | Cancel one. Start typing to pick from a list. |
+| `/agenda` | Post today's agenda checklist now (replaces the day's existing one). |
 
 - **time**: `3pm`, `3:30pm`, `9am`, `15:00`, `1530`, `noon`, `midnight`. A bare `3` is rejected as
   ambiguous (AM or PM?). A time with a colon but no am/pm is 24-hour, so `9:00` means 9 AM.
 - **notif**: minutes of warning before the event (default `0` = no warning). With `notif:10` you get
   a warning 10 minutes before **and** a message at the event time.
 - The bot always replies with exactly when it scheduled the reminder. Check that line.
+
+## The daily agenda
+
+At `AGENDA_HOUR` (default 10 AM) the bot posts one embed in `AGENDA_CHANNEL_ID` listing the day's
+plan, and edits that same message as the day goes on:
+
+- ⬜ still to come, 🔔 its time has passed, ✅ checked off, ⬛ missed while the bot was offline.
+- A **Mark done…** dropdown checks tasks off (several at once). A checked task stops firing.
+- A **Refresh** button re-renders it from the database.
+- Every reminder DM also carries **Done** and **Snooze** buttons. Snooze pushes it out by
+  `SNOOZE_MINUTES` (default 10) with no second warning.
+
+The buttons keep working after a restart: every component has a fixed id that is registered at
+startup, and the state lives in SQLite, not in memory.
+
+**Channel permissions:** the bot needs **View Channel**, **Send Messages** and **Embed Links**
+in the agenda channel. Without Embed Links the agenda can't be posted at all.
 
 ### How "today" and "tomorrow" work (day cutoff)
 
@@ -56,7 +74,8 @@ notepad .env                           # fill in DISCORD_TOKEN, GUILD_ID, OWNER_
 3. **OAuth2 → URL Generator**: select the scopes `bot` and `applications.commands` and the permission
    **Send Messages**. Open the generated URL and invite the bot to your server.
 4. In Discord, turn on Developer Mode (Settings → Advanced). Right-click your server → **Copy Server ID**
-   (`GUILD_ID`), and right-click yourself → **Copy User ID** (`OWNER_ID`).
+   (`GUILD_ID`), right-click yourself → **Copy User ID** (`OWNER_ID`), and right-click the channel you
+   want the agenda in → **Copy Channel ID** (`AGENDA_CHANNEL_ID`).
 5. Right-click your server → **Privacy Settings** and make sure **Direct Messages** is on.
 
 ## Run
@@ -79,8 +98,10 @@ pytest
 ```
 bot/
   __main__.py    entry point (python -m bot)
-  client.py      bot setup, command sync
-  planner.py     slash commands + reminder loop
+  client.py      bot setup, command sync, persistent component registration
+  planner.py     slash commands + reminder loop + agenda posting
+  agenda.py      the agenda embed (icons, lines, counts)
+  views.py       dropdown, refresh button, Done/Snooze buttons
   notifier.py    what's due and what the message says
   scheduling.py  today/tomorrow + time -> UTC instant (day cutoff, DST)
   timeparse.py   "3:30pm" -> time

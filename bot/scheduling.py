@@ -40,6 +40,17 @@ def planning_date(now: datetime, tz: ZoneInfo, cutoff_hour: int) -> date:
     return (local - timedelta(hours=cutoff_hour)).date()
 
 
+def moment_for(plan_day: date, clock: time, tz: ZoneInfo, cutoff_hour: int) -> datetime:
+    """The UTC instant of ``clock`` on planning day ``plan_day``.
+
+    Times before the cutoff belong to the late-night tail of the planning day, so they land
+    on the next calendar date. The round-trip through UTC resolves DST gaps and overlaps to
+    a real instant.
+    """
+    cal_day = plan_day + timedelta(days=1) if clock.hour < cutoff_hour else plan_day
+    return datetime.combine(cal_day, clock, tzinfo=tz).astimezone(timezone.utc)
+
+
 def resolve(
     day: Day,
     clock: time,
@@ -62,12 +73,7 @@ def resolve(
     if day is Day.TOMORROW:
         plan_day += timedelta(days=1)
 
-    # Times before the cutoff are the late-night tail of the planning day.
-    cal_day = plan_day + timedelta(days=1) if clock.hour < cutoff_hour else plan_day
-
-    # Round-trip through UTC so DST gaps/overlaps resolve to a real instant.
-    event_local = datetime.combine(cal_day, clock, tzinfo=tz)
-    event_at = event_local.astimezone(timezone.utc)
+    event_at = moment_for(plan_day, clock, tz, cutoff_hour)
 
     now_utc = now.astimezone(timezone.utc)
     if event_at <= now_utc:
